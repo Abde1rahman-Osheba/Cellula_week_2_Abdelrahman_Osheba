@@ -1,4 +1,3 @@
-
 import streamlit as st
 from PIL import Image
 
@@ -6,10 +5,6 @@ from imagecaption import generate_caption
 from text_classifier import TextClassifier
 from database import save_record, load_records
 
-
-# ---------------------------------------------------------------------------
-# Page configuration
-# ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="Text & Image Classifier",
     page_icon="🔍",
@@ -17,17 +12,11 @@ st.set_page_config(
 )
 
 
-# ---------------------------------------------------------------------------
-# Cache the classifier so it loads only once
-# ---------------------------------------------------------------------------
 @st.cache_resource(show_spinner="Loading classification models … this may take a few minutes on first run.")
 def get_classifier():
     return TextClassifier()
 
 
-# ---------------------------------------------------------------------------
-# Sidebar navigation
-# ---------------------------------------------------------------------------
 st.sidebar.title("📋 Navigation")
 page = st.sidebar.radio(
     "Go to",
@@ -35,14 +24,9 @@ page = st.sidebar.radio(
 )
 
 
-# ===========================================================================
-# PAGE 1 — Classify Text
-# ===========================================================================
 if page == "🔤 Classify Text":
     st.title("🔤 Text Classification")
-    st.markdown(
-        "Enter any text below and the hybrid ensemble model will classify it."
-    )
+    st.markdown("Enter any text below and the hybrid ensemble model will classify it.")
 
     user_text = st.text_area(
         "Enter your text:",
@@ -58,15 +42,12 @@ if page == "🔤 Classify Text":
             with st.spinner("Classifying …"):
                 result = classifier.classify(query=user_text)
 
-            # Display results
             st.success(f"**Classification:** {result['label']}")
             st.metric("Confidence", f"{result['confidence']:.2%}")
 
             st.subheader("Class Probabilities")
-            prob_data = result["probs"]
-            st.bar_chart(prob_data)
+            st.bar_chart(result["probs"])
 
-            # Save to CSV database
             save_record(
                 input_type="text",
                 input_text=user_text.strip(),
@@ -76,9 +57,6 @@ if page == "🔤 Classify Text":
             st.info("✅ Result saved to database.")
 
 
-# ===========================================================================
-# PAGE 2 — Classify Image
-# ===========================================================================
 elif page == "🖼️ Classify Image":
     st.title("🖼️ Image Classification")
     st.markdown(
@@ -96,27 +74,22 @@ elif page == "🖼️ Classify Image":
         st.image(image, caption="Uploaded Image", use_container_width=True)
 
         if st.button("Generate Caption & Classify", type="primary"):
-            # Generate caption
             with st.spinner("Generating caption with BLIP-1 …"):
                 caption = generate_caption(image)
 
             st.subheader("Generated Caption")
             st.write(f"**{caption}**")
 
-            # Classify caption
             classifier = get_classifier()
             with st.spinner("Classifying caption …"):
                 result = classifier.classify(query="", image_caption=caption)
 
-            # Display results
             st.success(f"**Classification:** {result['label']}")
             st.metric("Confidence", f"{result['confidence']:.2%}")
 
             st.subheader("Class Probabilities")
-            prob_data = result["probs"]
-            st.bar_chart(prob_data)
+            st.bar_chart(result["probs"])
 
-            # Save to CSV database
             save_record(
                 input_type="image",
                 input_text=caption,
@@ -126,9 +99,6 @@ elif page == "🖼️ Classify Image":
             st.info("✅ Result saved to database.")
 
 
-# ===========================================================================
-# PAGE 3 — View Database
-# ===========================================================================
 elif page == "📊 View Database":
     st.title("📊 Classification Database")
     st.markdown("All user inputs and their classification results are stored here.")
@@ -141,7 +111,6 @@ elif page == "📊 View Database":
         st.metric("Total Records", len(records))
         st.dataframe(records, use_container_width=True)
 
-        # Download button
         csv_data = records.to_csv(index=False).encode("utf-8")
         st.download_button(
             label="📥 Download CSV",

@@ -1,15 +1,3 @@
-"""
-text_classifier.py
-------------------
-Inference-only text classification module.
-
-Loads pre-trained artifacts:
-  - DistilBERT + LoRA adapter (from ./distilbert_lora_toxic/)
-  - ALBERT + LoRA adapter (from ./albert_lora_toxic/)
-  - Bidirectional LSTM (from ./toxic_hybrid_artifacts/)
-  - LogisticRegression meta-model (from ./toxic_hybrid_artifacts/)
-"""
-
 import re
 import json
 from pathlib import Path
@@ -25,24 +13,13 @@ from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
 )
-from peft import PeftModel
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-DISTIL_BASE = "distilbert-base-uncased"
-ALBERT_BASE = "albert-base-v2"
-
-DISTIL_DIR = Path("./distilbert_lora_toxic")
-ALBERT_DIR = Path("./albert_lora_toxic")
+DISTIL_DIR = Path("./distilbert_merged")
+ALBERT_DIR = Path("./albert_merged")
 ARTIFACT_DIR = Path("./toxic_hybrid_artifacts")
 
-
-# ===========================================================================
-# LSTM helpers (needed for inference)
-# ===========================================================================
 
 def simple_tokenize(text: str) -> List[str]:
     text = text.lower()
@@ -83,12 +60,9 @@ class ToxicLSTM(nn.Module):
         return self.fc(last)
 
 
-# ===========================================================================
-# Inference helpers
-# ===========================================================================
-
 @torch.no_grad()
 def transformer_proba(model, tokenizer, texts: List[str], batch_size: int = 32) -> np.ndarray:
+    """Get class probabilities from a transformer model."""
     all_probs = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
@@ -102,6 +76,7 @@ def transformer_proba(model, tokenizer, texts: List[str], batch_size: int = 32) 
 
 @torch.no_grad()
 def lstm_proba(model, vocab, texts, max_len=128, batch_size=128) -> np.ndarray:
+    """Get class probabilities from the LSTM model."""
     model.eval()
     probs_list = []
     for i in range(0, len(texts), batch_size):
@@ -116,37 +91,12 @@ def lstm_proba(model, vocab, texts, max_len=128, batch_size=128) -> np.ndarray:
 
 
 def build_meta_features(p_distil, p_albert, p_lstm) -> np.ndarray:
+    """Concatenate base-model probabilities into meta features."""
     return np.hstack([p_distil, p_albert, p_lstm])
 
 
-# ===========================================================================
-# PEFT model loader
-# ===========================================================================
-
-def load_peft_model(adapter_dir: str, base_model_name: str, num_labels: int):
-    """Load a PEFT (LoRA) adapter on top of its base model."""
-    tokenizer = AutoTokenizer.from_pretrained(adapter_dir, use_fast=True)
-    base_model = AutoModelForSequenceClassification.from_pretrained(
-        base_model_name, num_labels=num_labels
-    )
-    model = PeftModel.from_pretrained(base_model, adapter_dir)
-    model.to(DEVICE)
-    model.eval()
-    return model, tokenizer
-
-
-# ===========================================================================
-# TextClassifier — main public interface (inference only)
-# ===========================================================================
-
 class TextClassifier:
-    """
-    Hybrid ensemble text classifier (inference only).
-
-    Loads model weights from the saved PEFT adapter folders and
-    LSTM / meta-model artifacts. If artifacts are missing, raises
-    a clear error.
-    """
+    """Hybrid ensemble text classifier (inference only)."""
 
     def __init__(self):
         self.label_names: List[str] = []
@@ -162,43 +112,40 @@ class TextClassifier:
         self._load_artifacts()
 
     def _load_artifacts(self):
-        """Load all pre-trained artifacts from disk."""
-
-        # Check required files exist
         required = {
             "Label classes": ARTIFACT_DIR / "label_classes.json",
             "LSTM weights": ARTIFACT_DIR / "lstm.pt",
             "LSTM vocab": ARTIFACT_DIR / "lstm_vocab.json",
             "Meta-model": ARTIFACT_DIR / "meta_model.joblib",
-            "DistilBERT adapter": DISTIL_DIR / "adapter_config.json",
-            "ALBERT adapter": ALBERT_DIR / "adapter_config.json",
+            "DistilBERT (merged)": DISTIL_DIR / "config.json",
+            "ALBERT (merged)": ALBERT_DIR / "config.json",
         }
         missing = [name for name, path in required.items() if not path.exists()]
         if missing:
             raise FileNotFoundError(
                 f"Missing model artifacts: {', '.join(missing)}. "
-                f"Please run 'python train.py' first to train and save all models."
+                f"Run 'python merge_adapters.py' to create merged models."
             )
 
-        print("[TextClassifier] Loading pre-saved artifacts …")
+        print("[TextClassifier] Loading models …")
 
-        # Label names
         self.label_names = json.loads(
             (ARTIFACT_DIR / "label_classes.json").read_text(encoding="utf-8")
         )
         self.num_labels = len(self.label_names)
 
-        # DistilBERT + LoRA adapter
-        self.distil_model, self.distil_tok = load_peft_model(
-            str(DISTIL_DIR), DISTIL_BASE, self.num_labels
-        )
+        self.distil_tok = AutoTokenizer.from_pretrained(str(DISTIL_DIR), use_fast=True)
+        self.distil_model = AutoModelForSequenceClassification.from_pretrained(
+            str(DISTIL_DIR)
+        ).to(DEVICE)
+        self.distil_model.eval()
 
-        # ALBERT + LoRA adapter
-        self.albert_model, self.albert_tok = load_peft_model(
-            str(ALBERT_DIR), ALBERT_BASE, self.num_labels
-        )
+        self.albert_tok = AutoTokenizer.from_pretrained(str(ALBERT_DIR), use_fast=True)
+        self.albert_model = AutoModelForSequenceClassification.from_pretrained(
+            str(ALBERT_DIR)
+        ).to(DEVICE)
+        self.albert_model.eval()
 
-        # LSTM
         self.lstm_vocab = json.loads(
             (ARTIFACT_DIR / "lstm_vocab.json").read_text(encoding="utf-8")
         )
@@ -210,19 +157,12 @@ class TextClassifier:
         )
         self.lstm_model.eval()
 
-        # Meta-model
         self.meta = joblib.load(ARTIFACT_DIR / "meta_model.joblib")
 
-        print("[TextClassifier] All models loaded successfully.")
+        print("[TextClassifier] All models ready.")
 
     def classify(self, query: str, image_caption: str = "") -> Dict:
-        """
-        Classify text using the hybrid ensemble.
-
-        Returns
-        -------
-        dict : {"label": str, "confidence": float, "probs": {label: float, ...}}
-        """
+        """Classify text using the hybrid ensemble. Returns label, confidence, and per-class probs."""
         text = (str(query).strip() + " [SEP] " + str(image_caption).strip()).strip()
 
         p_d = transformer_proba(self.distil_model, self.distil_tok, [text])[0]

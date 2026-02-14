@@ -1,11 +1,6 @@
 """
-train.py
---------
-Standalone training script. Run this ONCE locally (or on Google Colab) to
-train all models and save artifacts. The Streamlit app only loads artifacts.
-
-Usage:
-    python train.py
+Standalone training script. Run once locally or on Colab to train all models.
+Usage: python train.py
 """
 
 import os
@@ -23,12 +18,7 @@ import joblib
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
-    f1_score,
-    accuracy_score,
-)
+from sklearn.metrics import classification_report, confusion_matrix, f1_score, accuracy_score
 from sklearn.linear_model import LogisticRegression
 
 import torch
@@ -44,11 +34,8 @@ from transformers import (
     set_seed,
 )
 
-from peft import LoraConfig, get_peft_model, PeftModel, TaskType
+from peft import LoraConfig, get_peft_model, TaskType
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -61,19 +48,12 @@ ALBERT_OUT = "./albert_lora_toxic"
 ARTIFACT_DIR = Path("./toxic_hybrid_artifacts")
 DATA_PATH = Path("./cellula toxic data.csv")
 
-# ---------------------------------------------------------------------------
-# Reproducibility
-# ---------------------------------------------------------------------------
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
 set_seed(SEED)
 
-
-# ===========================================================================
-# Helper Dataset / Tokenization utilities
-# ===========================================================================
 
 @dataclass
 class HFTextDataset(Dataset):
@@ -100,10 +80,6 @@ def compute_metrics(eval_pred):
         "f1_weighted": f1_score(labels, preds, average="weighted"),
     }
 
-
-# ===========================================================================
-# LSTM helpers
-# ===========================================================================
 
 def simple_tokenize(text: str) -> List[str]:
     text = text.lower()
@@ -147,9 +123,7 @@ class LSTMDataset(Dataset):
         return len(self.texts)
 
     def __getitem__(self, idx):
-        x = torch.tensor(
-            encode_text(self.texts[idx], self.vocab, self.max_len), dtype=torch.long
-        )
+        x = torch.tensor(encode_text(self.texts[idx], self.vocab, self.max_len), dtype=torch.long)
         y = torch.tensor(self.labels[idx], dtype=torch.long)
         return x, y
 
@@ -158,9 +132,7 @@ class ToxicLSTM(nn.Module):
     def __init__(self, vocab_size, num_labels, emb_dim=128, hidden=128, dropout=0.3, bidir=True):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, emb_dim, padding_idx=0)
-        self.lstm = nn.LSTM(
-            input_size=emb_dim, hidden_size=hidden, batch_first=True, bidirectional=bidir,
-        )
+        self.lstm = nn.LSTM(input_size=emb_dim, hidden_size=hidden, batch_first=True, bidirectional=bidir)
         out_dim = hidden * (2 if bidir else 1)
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(out_dim, num_labels)
@@ -176,10 +148,6 @@ class ToxicLSTM(nn.Module):
         return self.fc(last)
 
 
-# ===========================================================================
-# Training functions
-# ===========================================================================
-
 def train_lora_transformer(
     base_model_name: str,
     output_dir: str,
@@ -194,13 +162,12 @@ def train_lora_transformer(
     lora_dropout: float = 0.05,
     lora_target_modules: Optional[List[str]] = None,
 ):
+    """Fine-tune a transformer with LoRA, then merge and save."""
     output_dir = str(output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
     tokenizer = AutoTokenizer.from_pretrained(base_model_name, use_fast=True)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        base_model_name, num_labels=num_labels
-    )
+    model = AutoModelForSequenceClassification.from_pretrained(base_model_name, num_labels=num_labels)
 
     lora_config = LoraConfig(
         task_type=TaskType.SEQ_CLS,
@@ -229,9 +196,6 @@ def train_lora_transformer(
             tok["labels"] = item["labels"]
             return tok
 
-    train_tok = TokenizingWrapper(train_ds)
-    eval_tok = TokenizingWrapper(eval_ds)
-
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
     args = TrainingArguments(
@@ -253,15 +217,15 @@ def train_lora_transformer(
     trainer = Trainer(
         model=model,
         args=args,
-        train_dataset=train_tok,
-        eval_dataset=eval_tok,
+        train_dataset=TokenizingWrapper(train_ds),
+        eval_dataset=TokenizingWrapper(eval_ds),
         data_collator=collator,
         compute_metrics=compute_metrics,
     )
 
     trainer.train()
 
-    # --- FIX: merge LoRA weights into the base model and save everything ---
+    # Merge LoRA into base model so inference doesn't need PEFT
     merged_model = model.merge_and_unload()
     merged_model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
@@ -269,23 +233,12 @@ def train_lora_transformer(
     return output_dir
 
 
-def train_lstm_model(
-    train_df: pd.DataFrame,
-    val_df: pd.DataFrame,
-    num_labels: int,
-    max_len: int = 128,
-    batch_size: int = 64,
-    lr: float = 1e-3,
-    epochs: int = 8,
-):
+def train_lstm_model(train_df, val_df, num_labels, max_len=128, batch_size=64, lr=1e-3, epochs=8):
+    """Train a bidirectional LSTM classifier."""
     vocab = build_vocab(train_df["text"].tolist(), min_freq=2, max_vocab=30000)
 
-    train_ds = LSTMDataset(
-        train_df["text"].tolist(), train_df["label_id"].tolist(), vocab, max_len=max_len
-    )
-    val_ds = LSTMDataset(
-        val_df["text"].tolist(), val_df["label_id"].tolist(), vocab, max_len=max_len
-    )
+    train_ds = LSTMDataset(train_df["text"].tolist(), train_df["label_id"].tolist(), vocab, max_len=max_len)
+    val_ds = LSTMDataset(val_df["text"].tolist(), val_df["label_id"].tolist(), vocab, max_len=max_len)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
@@ -294,8 +247,7 @@ def train_lstm_model(
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.CrossEntropyLoss()
 
-    best_f1 = -1
-    best_state = None
+    best_f1, best_state = -1, None
 
     for ep in range(1, epochs + 1):
         model.train()
@@ -314,8 +266,7 @@ def train_lstm_model(
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                logits = model(xb)
-                preds = torch.argmax(logits, dim=-1)
+                preds = torch.argmax(model(xb), dim=-1)
                 all_preds.extend(preds.cpu().numpy().tolist())
                 all_true.extend(yb.cpu().numpy().tolist())
 
@@ -330,56 +281,39 @@ def train_lstm_model(
     return model, vocab
 
 
-# ===========================================================================
-# Inference helpers (used for meta-model training)
-# ===========================================================================
-
 @torch.no_grad()
-def transformer_proba(model, tokenizer, texts: List[str], batch_size: int = 32) -> np.ndarray:
+def transformer_proba(model, tokenizer, texts, batch_size=32):
     all_probs = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
         enc = tokenizer(batch, truncation=True, max_length=256, padding=True, return_tensors="pt")
         enc = {k: v.to(DEVICE) for k, v in enc.items()}
-        logits = model(**enc).logits
-        probs = torch.softmax(logits, dim=-1).cpu().numpy()
+        probs = torch.softmax(model(**enc).logits, dim=-1).cpu().numpy()
         all_probs.append(probs)
     return np.vstack(all_probs)
 
 
 @torch.no_grad()
-def lstm_proba(model, vocab, texts, max_len=128, batch_size=128) -> np.ndarray:
+def lstm_proba(model, vocab, texts, max_len=128, batch_size=128):
     model.eval()
     probs_list = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
-        x = torch.tensor(
-            [encode_text(t, vocab, max_len=max_len) for t in batch], dtype=torch.long
-        ).to(DEVICE)
-        logits = model(x)
-        probs = torch.softmax(logits, dim=-1).cpu().numpy()
+        x = torch.tensor([encode_text(t, vocab, max_len=max_len) for t in batch], dtype=torch.long).to(DEVICE)
+        probs = torch.softmax(model(x), dim=-1).cpu().numpy()
         probs_list.append(probs)
     return np.vstack(probs_list)
 
 
-def build_meta_features(p_distil, p_albert, p_lstm) -> np.ndarray:
+def build_meta_features(p_distil, p_albert, p_lstm):
     return np.hstack([p_distil, p_albert, p_lstm])
 
-
-# ===========================================================================
-# MAIN — run training end-to-end
-# ===========================================================================
 
 def main():
     print(f"Device: {DEVICE}")
 
-    # Load dataset
     df = pd.read_csv(DATA_PATH)
-    df = df.rename(columns={
-        "query": "query",
-        "image descriptions": "image_desc",
-        "Toxic Category": "label",
-    })
+    df = df.rename(columns={"query": "query", "image descriptions": "image_desc", "Toxic Category": "label"})
     df["query"] = df["query"].fillna("").astype(str)
     df["image_desc"] = df["image_desc"].fillna("").astype(str)
     df["label"] = df["label"].fillna("Unknown").astype(str)
@@ -391,65 +325,53 @@ def main():
     num_labels = len(label_names)
     print(f"Classes ({num_labels}): {label_names}")
 
-    # Splits
     train_df, temp_df = train_test_split(df, test_size=0.30, random_state=SEED, stratify=df["label_id"])
     val_df, test_df = train_test_split(temp_df, test_size=0.50, random_state=SEED, stratify=temp_df["label_id"])
     print(f"Train: {len(train_df)}  Val: {len(val_df)}  Test: {len(test_df)}")
 
-    # --- DistilBERT + LoRA ---
     print("\n>>> Training DistilBERT + LoRA …")
     distil_dir = train_lora_transformer(
         base_model_name=DISTIL_BASE, output_dir=DISTIL_OUT,
         train_df=train_df, eval_df=val_df, num_labels=num_labels,
-        lr=2e-4, epochs=4, batch_size=16,
     )
 
-    # --- ALBERT + LoRA ---
     print("\n>>> Training ALBERT + LoRA …")
     albert_dir = train_lora_transformer(
         base_model_name=ALBERT_BASE, output_dir=ALBERT_OUT,
         train_df=train_df, eval_df=val_df, num_labels=num_labels,
-        lr=2e-4, epochs=4, batch_size=16,
         lora_target_modules=["query", "value"],
     )
 
-    # --- LSTM ---
     print("\n>>> Training LSTM …")
     lstm_model, lstm_vocab = train_lstm_model(
         train_df=train_df, val_df=val_df, num_labels=num_labels,
-        max_len=128, batch_size=64, lr=1e-3, epochs=10,
     )
 
-    # --- Load merged transformer models for inference ---
-    print("\n>>> Loading merged models for meta-model training …")
+    print("\n>>> Loading merged models for meta-model …")
     distil_tok = AutoTokenizer.from_pretrained(distil_dir, use_fast=True)
-    distil_model = AutoModelForSequenceClassification.from_pretrained(distil_dir).to(DEVICE)
-    distil_model.eval()
+    distil_model = AutoModelForSequenceClassification.from_pretrained(distil_dir).to(DEVICE).eval()
 
     albert_tok = AutoTokenizer.from_pretrained(albert_dir, use_fast=True)
-    albert_model = AutoModelForSequenceClassification.from_pretrained(albert_dir).to(DEVICE)
-    albert_model.eval()
+    albert_model = AutoModelForSequenceClassification.from_pretrained(albert_dir).to(DEVICE).eval()
 
-    # --- Meta-model (Logistic Regression on val set) ---
     print("\n>>> Building meta-model …")
     val_texts = val_df["text"].tolist()
-    val_p_distil = transformer_proba(distil_model, distil_tok, val_texts)
-    val_p_albert = transformer_proba(albert_model, albert_tok, val_texts)
-    val_p_lstm = lstm_proba(lstm_model, lstm_vocab, val_texts)
-
-    X_meta_val = build_meta_features(val_p_distil, val_p_albert, val_p_lstm)
+    X_meta_val = build_meta_features(
+        transformer_proba(distil_model, distil_tok, val_texts),
+        transformer_proba(albert_model, albert_tok, val_texts),
+        lstm_proba(lstm_model, lstm_vocab, val_texts),
+    )
     y_meta_val = val_df["label_id"].to_numpy()
 
     meta = LogisticRegression(max_iter=2000, multi_class="multinomial")
     meta.fit(X_meta_val, y_meta_val)
 
-    # --- Evaluate on test set ---
     test_texts = test_df["text"].tolist()
-    test_p_distil = transformer_proba(distil_model, distil_tok, test_texts)
-    test_p_albert = transformer_proba(albert_model, albert_tok, test_texts)
-    test_p_lstm = lstm_proba(lstm_model, lstm_vocab, test_texts)
-
-    X_meta_test = build_meta_features(test_p_distil, test_p_albert, test_p_lstm)
+    X_meta_test = build_meta_features(
+        transformer_proba(distil_model, distil_tok, test_texts),
+        transformer_proba(albert_model, albert_tok, test_texts),
+        lstm_proba(lstm_model, lstm_vocab, test_texts),
+    )
     y_test = test_df["label_id"].to_numpy()
     test_preds = np.argmax(meta.predict_proba(X_meta_test), axis=1)
 
@@ -457,21 +379,14 @@ def main():
     print("Accuracy:", accuracy_score(y_test, test_preds))
     print("F1 macro:", f1_score(y_test, test_preds, average="macro"))
     print("\nClassification report:\n", classification_report(y_test, test_preds, target_names=label_names))
-    print("\nConfusion matrix:\n", confusion_matrix(y_test, test_preds))
 
-    # --- Save all artifacts ---
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     (ARTIFACT_DIR / "label_classes.json").write_text(json.dumps(label_names, indent=2), encoding="utf-8")
     torch.save(lstm_model.state_dict(), ARTIFACT_DIR / "lstm.pt")
     (ARTIFACT_DIR / "lstm_vocab.json").write_text(json.dumps(lstm_vocab, indent=2), encoding="utf-8")
     joblib.dump(meta, ARTIFACT_DIR / "meta_model.joblib")
 
-    print(f"\n✅ All artifacts saved!")
-    print(f"   Merged DistilBERT  → {distil_dir}/")
-    print(f"   Merged ALBERT      → {albert_dir}/")
-    print(f"   LSTM + vocab       → {ARTIFACT_DIR}/")
-    print(f"   Meta-model         → {ARTIFACT_DIR}/meta_model.joblib")
-    print(f"\nYou can now run:  streamlit run app.py")
+    print(f"\n✅ All artifacts saved! Run: streamlit run app.py")
 
 
 if __name__ == "__main__":
